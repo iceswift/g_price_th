@@ -2,19 +2,44 @@ from fastapi import FastAPI, HTTPException
 import requests
 from bs4 import BeautifulSoup
 from typing import Optional, List, Dict
-import time # เพิ่ม time เข้ามาเพื่อจับเวลา
+import time
+from datetime import datetime, time as dt_time
+import pytz # ต้องลง pip install pytz
 
-app = FastAPI(title="Gold Price & Currency API", description="API พร้อมระบบ Caching", version="4.0.0")
+app = FastAPI(title="Gold Price API (Smart Schedule)", description="API ราคาทองคำ พร้อมระบบ Cache ตามเวลาตลาด", version="5.0.0")
 
 # --- Configuration ---
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# --- CACHE STORAGE (ตัวเก็บข้อมูลชั่วคราว) ---
-CACHE_DURATION = 120  # เก็บข้อมูลไว้ 120 วินาที (2 นาที)
+# --- CACHE STORAGE ---
+CACHE_DURATION_ACTIVE = 120  # ตลาดเปิด: จำข้อมูล 2 นาที
 _cache_gold = {"data": None, "timestamp": 0}
 _cache_currency = {"data": None, "timestamp": 0}
+
+# --- TIME & SCHEDULE LOGIC (ส่วนสำคัญที่เพิ่มมา) ---
+def is_market_open():
+    """
+    เช็คว่าตอนนี้ตลาดเปิดหรือไม่ (ตามเวลาไทย)
+    เงื่อนไข: จันทร์-เสาร์ (0-5) เวลา 09:00 - 17:30
+    """
+    tz = pytz.timezone('Asia/Bangkok')
+    now = datetime.now(tz)
+    
+    # เช็ควัน (0=Monday, 6=Sunday)
+    if now.weekday() == 6: # วันอาทิตย์ ปิดตลอดวัน
+        return False
+        
+    # เช็คเวลา (09:00 - 17:30)
+    current_time = now.time()
+    market_open = dt_time(9, 0)
+    market_close = dt_time(17, 30)
+    
+    if market_open <= current_time <= market_close:
+        return True
+    
+    return False
 
 # --- Helper Functions ---
 
@@ -29,7 +54,6 @@ def get_html(url):
     return None
 
 def _fetch_thb_rate_fresh():
-    """ฟังก์ชันวิ่งไปดึงค่าเงินจริง (ไม่ผ่าน Cache)"""
     url = "https://www.thaigold.info/RealTimeDataV2/gtdata_.txt"
     try:
         response = requests.get(url, headers=HEADERS, timeout=5)
@@ -43,10 +67,8 @@ def _fetch_thb_rate_fresh():
     return None
 
 def _fetch_gold_list_fresh():
-    """ฟังก์ชันวิ่งไปดึงราคาทองจริง (ไม่ผ่าน Cache)"""
     url = "https://www.goldtraders.or.th/UpdatePriceList.aspx"
     soup = get_html(url)
-    
     data_rows = []
     if not soup: return None
 
@@ -75,15 +97,28 @@ def _fetch_gold_list_fresh():
                     data_rows.append(record)
     return data_rows
 
-# --- SMART DATA RETRIEVAL (ตัวจัดการ Cache) ---
+# --- SMART DATA RETRIEVAL (แก้ Logic การ Cache ตรงนี้) ---
 
 def get_gold_data_smart():
     global _cache_gold
     current_time = time.time()
+    market_active = is_market_open()
     
-    # ถ้าข้อมูลเก่าเกิน 2 นาที หรือยังไม่มีข้อมูล ให้ไปดึงใหม่
-    if current_time - _cache_gold["timestamp"] > CACHE_DURATION or _cache_gold["data"] is None:
-        print("Fetching new GOLD data from website...") # Log ดูว่ามีการดึงใหม่
+    # เงื่อนไขการดึงข้อมูลใหม่:
+    # 1. ยังไม่มีข้อมูลเลย (เพิ่งเริ่ม Server) -> ต้องดึง
+    # 2. ตลาดเปิดอยู่ AND ข้อมูลเก่าเกิน 2 นาที -> ดึงใหม่
+    # 3. (ถ้าตลาดปิด เราจะไม่ดึงใหม่เลย จะใช้ของเดิมค้างไว้)
+    
+    should_fetch = False
+    
+    if _cache_gold["data"] is None:
+        should_fetch = True
+    elif market_active and (current_time - _cache_gold["timestamp"] > CACHE_DURATION_ACTIVE):
+        should_fetch = True
+        
+    if should_fetch:
+        status_msg = "Market OPEN" if market_active else "Market CLOSED (First Fetch)"
+        print(f"[{status_msg}] Fetching new GOLD data...") 
         new_data = _fetch_gold_list_fresh()
         if new_data:
             _cache_gold["data"] = new_data
@@ -94,9 +129,19 @@ def get_gold_data_smart():
 def get_currency_data_smart():
     global _cache_currency
     current_time = time.time()
+    # ค่าเงินบาท ตลาด Forex อาจจะปิดคนละเวลากับทองไทย 
+    # แต่เพื่อความง่าย เราใช้ Logic เดียวกัน หรือจะปล่อยให้ Cache ตลอดเวลาก็ได้
+    # ในที่นี้ขอใช้ Logic เดียวกับทองเพื่อประหยัด Resource
     
-    if current_time - _cache_currency["timestamp"] > CACHE_DURATION or _cache_currency["data"] is None:
-        print("Fetching new CURRENCY data from website...")
+    market_active = is_market_open()
+    should_fetch = False
+    
+    if _cache_currency["data"] is None:
+        should_fetch = True
+    elif market_active and (current_time - _cache_currency["timestamp"] > CACHE_DURATION_ACTIVE):
+        should_fetch = True
+            
+    if should_fetch:
         new_data = _fetch_thb_rate_fresh()
         if new_data:
             _cache_currency["data"] = new_data
@@ -108,7 +153,8 @@ def get_currency_data_smart():
 
 @app.get("/")
 def read_root():
-    return {"message": "Gold API with Caching System is running"}
+    status = "OPEN" if is_market_open() else "CLOSED"
+    return {"message": f"Gold API is running. Market Status: {status}"}
 
 @app.get("/api/latest")
 def get_latest_market_data():
@@ -144,7 +190,6 @@ def get_price_updates():
 
 @app.get("/api/jewelry")
 def get_jewelry_prices():
-    # อันนี้ดึงสด เพราะคนเรียกไม่บ่อย ไม่จำเป็นต้อง Cache ก็ได้ หรือจะทำก็ได้ครับ
     url = "https://www.goldtraders.or.th/DailyPrices.aspx"
     soup = get_html(url)
     if not soup: raise HTTPException(status_code=503, detail="Cannot access daily prices")
