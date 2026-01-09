@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 from typing import Optional, List, Dict
 
-app = FastAPI(title="Gold Price & Currency API", description="API ราคาทองคำและอัตราแลกเปลี่ยน", version="3.0.0")
+app = FastAPI(title="Gold Price & Currency API", description="API ราคาทองคำและอัตราแลกเปลี่ยน", version="3.1.0")
 
 # --- Configuration ---
 HEADERS = {
@@ -23,18 +23,15 @@ def get_html(url):
     return None
 
 def _get_thb_rate():
-    """ดึงข้อมูลค่าเงินบาทจาก Thaigold (Logic ใหม่ที่คุณเพิ่มมา)"""
+    """ดึงข้อมูลค่าเงินบาทจาก Thaigold"""
     url = "https://www.thaigold.info/RealTimeDataV2/gtdata_.txt"
     try:
-        # ใช้ Headers เดิม หรือจะแยกก็ได้ แต่ใช้เหมือนกันก็สะดวกดีครับ
         response = requests.get(url, headers=HEADERS, timeout=5)
         if response.status_code == 200:
-            data_list = response.json() # แปลงข้อมูล Text เป็น List/JSON
-            
-            # วนลูปหา object ที่มี name เป็น THB
+            data_list = response.json()
             for item in data_list:
                 if item.get("name") == "THB":
-                    return item # คืนค่า dictionary ของ THB กลับไป
+                    return item 
     except Exception as e:
         print(f"Error accessing currency data: {e}")
     return None
@@ -93,13 +90,10 @@ def read_root():
 @app.get("/api/latest")
 def get_latest_market_data():
     """
-    [Updated] ดึงข้อมูลตลาดล่าสุด (รวมทั้งราคาทองและค่าเงินบาท)
+    ดึงข้อมูลตลาดล่าสุด (รวมทั้งราคาทองและค่าเงินบาท)
     """
-    # 1. ดึงราคาทอง
     gold_data_list = _scrape_update_list()
     latest_gold = gold_data_list[0] if gold_data_list else None
-    
-    # 2. ดึงค่าเงิน
     currency_data = _get_thb_rate()
 
     if not latest_gold and not currency_data:
@@ -109,6 +103,18 @@ def get_latest_market_data():
         "gold": latest_gold,
         "currency": currency_data
     }
+
+@app.get("/api/gold")
+def get_gold_only():
+    """
+    ดึงเฉพาะราคาทองคำล่าสุด (ไม่มีค่าเงิน)
+    """
+    data = _scrape_update_list()
+    
+    if not data:
+        raise HTTPException(status_code=503, detail="Cannot access goldtraders website")
+        
+    return data[0]
 
 @app.get("/api/currency")
 def get_currency_only():
